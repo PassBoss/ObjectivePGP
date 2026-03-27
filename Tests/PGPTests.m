@@ -1127,6 +1127,10 @@ Hy2rxOlSAfBZaJr9A7XSPlU=\n\
     PGPSecretKeyPacket *secretKeyPacket = (PGPSecretKeyPacket *)reprotectedKey.secretKey.primaryKeyPacket;
     XCTAssertEqual(secretKeyPacket.s2k.iterationsCount, 243);
 
+    // Verify S2K count was upgraded on subkey
+    PGPSecretKeyPacket *subKeyPacket = (PGPSecretKeyPacket *)reprotectedKey.secretKey.subKeys.firstObject.primaryKeyPacket;
+    XCTAssertEqual(subKeyPacket.s2k.iterationsCount, 243);
+
     // Verify the new passphrase works
     error = nil;
     PGPKey *decryptedKey = [reprotectedKey decryptedWithPassphrase:newPassphrase error:&error];
@@ -1146,7 +1150,11 @@ Hy2rxOlSAfBZaJr9A7XSPlU=\n\
 
     NSError *error = nil;
     PGPKey *unlockedKey = [key decryptedWithPassphrase:passphrase error:&error];
+    XCTAssertNotNil(unlockedKey);
+    XCTAssertNil(error);
+
     PGPKey *reprotectedKey = [PGPKeyGenerator buildKey:unlockedKey withPassphrase:@"new-passphrase"];
+    XCTAssertNotNil(reprotectedKey);
 
     PGPSecretKeyPacket *secretKeyPacket = (PGPSecretKeyPacket *)reprotectedKey.secretKey.primaryKeyPacket;
     XCTAssertEqual(secretKeyPacket.s2k.iterationsCount, 243);

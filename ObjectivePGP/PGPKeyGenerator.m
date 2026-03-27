@@ -37,6 +37,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+// Original S2K count byte — preserves backward compatibility for callers that create a
+// KeyGenerator without specifying the count (e.g. the macOS app or other consumers).
+static const UInt8 kPGPS2KLegacyIterationsCount = 215;
+
+// Upgraded S2K count byte yielding ≥600k SHA-256 rounds. Used as the default when
+// re-protecting existing keys via buildKey:withPassphrase:, since passphrase changes
+// should always use the strongest available settings.
+static const UInt8 kPGPS2KUpgradedIterationsCount = 243;
+
 @implementation PGPKeyGenerator
 
 - (instancetype)init {
@@ -44,7 +53,7 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (instancetype)initWithAlgorithm:(PGPPublicKeyAlgorithm)algorithm keyBitsLength:(int)bits cipherAlgorithm:(PGPSymmetricAlgorithm)cipherAlgorithm hashAlgorithm:(PGPHashAlgorithm)hashAlgorithm {
-    return [self initWithAlgorithm:algorithm keyBitsLength:bits cipherAlgorithm:cipherAlgorithm hashAlgorithm:hashAlgorithm s2kIterationsCount:215];
+    return [self initWithAlgorithm:algorithm keyBitsLength:bits cipherAlgorithm:cipherAlgorithm hashAlgorithm:hashAlgorithm s2kIterationsCount:kPGPS2KLegacyIterationsCount];
 }
 
 - (instancetype)initWithAlgorithm:(PGPPublicKeyAlgorithm)algorithm keyBitsLength:(int)bits cipherAlgorithm:(PGPSymmetricAlgorithm)cipherAlgorithm hashAlgorithm:(PGPHashAlgorithm)hashAlgorithm s2kIterationsCount:(UInt8)s2kIterationsCount {
@@ -55,7 +64,10 @@ NS_ASSUME_NONNULL_BEGIN
         _version = 0x04;
         _cipherAlgorithm = cipherAlgorithm;
         _hashAlgorithm = hashAlgorithm;
-        _s2kIterationsCount = s2kIterationsCount;
+        if (s2kIterationsCount == 0) {
+            PGPLogWarning(@"s2kIterationsCount must be 1–255; 0 produces keys that cannot be exported. Defaulting to 1.");
+        }
+        _s2kIterationsCount = s2kIterationsCount ?: 1;
         switch(algorithm) {
             case PGPPublicKeyAlgorithmEdDSA:
                 _curveKind = PGPCurveEd25519;
@@ -191,7 +203,7 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 + (nullable PGPKey *)buildKey:(nullable PGPKey *)key withPassphrase:(nullable NSString *)passphrase {
-    return [self buildKey:key withPassphrase:passphrase s2kIterationsCount:243];
+    return [self buildKey:key withPassphrase:passphrase s2kIterationsCount:kPGPS2KUpgradedIterationsCount];
 }
 
 + (nullable PGPKey *)buildKey:(nullable PGPKey *)key withPassphrase:(nullable NSString *)passphrase s2kIterationsCount:(UInt8)s2kIterationsCount {
@@ -356,7 +368,7 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 + (PGPKey *)addSubKeyTo:(PGPKey *)parentKey passphrase:(nullable NSString *)passphrase spec:(PGPKeySpec*)keySpec {
-    return [self addSubKeyTo:parentKey passphrase:passphrase spec:keySpec s2kIterationsCount:243];
+    return [self addSubKeyTo:parentKey passphrase:passphrase spec:keySpec s2kIterationsCount:kPGPS2KUpgradedIterationsCount];
 }
 
 + (PGPKey *)addSubKeyTo:(PGPKey *)parentKey passphrase:(nullable NSString *)passphrase spec:(PGPKeySpec*)keySpec s2kIterationsCount:(UInt8)s2kIterationsCount {
