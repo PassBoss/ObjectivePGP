@@ -22,9 +22,11 @@ NS_SWIFT_NAME(KeyGenerator) @interface PGPKeyGenerator : NSObject
 @property (nonatomic) UInt8 version;
 @property (nonatomic) NSDate *createDate;
 
-/// S2K iteration count byte (RFC 4880 §3.7.1.3 coded value, 0–255).
-/// Default is 215 (~12M bytes hashed). Set to 243 for ≥600k SHA-256 rounds.
+/// S2K coded count byte (RFC 4880 §3.7.1.3, range 0–255).
+/// The byte encodes how many bytes of data are hashed to derive the key.
+/// Byte 215 (default) → ~12M bytes hashed. Byte 243 → ~40M bytes hashed (≥600k SHA-256 rounds).
 /// Only used when generating passphrase-protected keys.
+/// Values below 96 (~1k SHA-256 rounds) offer weak protection and should be avoided.
 @property (nonatomic, readonly) UInt8 s2kIterationsCount;
 
 - (PGPKey *)generateFor:(NSString *)userID passphrase:(nullable NSString *)passphrase;
