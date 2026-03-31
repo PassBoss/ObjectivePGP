@@ -37,6 +37,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+// Original S2K count byte — preserves backward compatibility for callers that create a
+// KeyGenerator without specifying the count (e.g. the macOS app or other consumers).
+static const UInt8 kPGPS2KLegacyIterationsCount = 215;
+
+// Upgraded S2K count byte yielding ≥600k SHA-256 rounds. Used as the default when
+// re-protecting existing keys via buildKey:withPassphrase:, since passphrase changes
+// should always use the strongest available settings.
+static const UInt8 kPGPS2KUpgradedIterationsCount = 243;
+
 @implementation PGPKeyGenerator
 
 - (instancetype)init {
@@ -44,6 +53,10 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (instancetype)initWithAlgorithm:(PGPPublicKeyAlgorithm)algorithm keyBitsLength:(int)bits cipherAlgorithm:(PGPSymmetricAlgorithm)cipherAlgorithm hashAlgorithm:(PGPHashAlgorithm)hashAlgorithm {
+    return [self initWithAlgorithm:algorithm keyBitsLength:bits cipherAlgorithm:cipherAlgorithm hashAlgorithm:hashAlgorithm s2kIterationsCount:kPGPS2KLegacyIterationsCount];
+}
+
+- (instancetype)initWithAlgorithm:(PGPPublicKeyAlgorithm)algorithm keyBitsLength:(int)bits cipherAlgorithm:(PGPSymmetricAlgorithm)cipherAlgorithm hashAlgorithm:(PGPHashAlgorithm)hashAlgorithm s2kIterationsCount:(UInt8)s2kIterationsCount {
     if ((self = [super init])) {
         _keyAlgorithm = algorithm;
         _keyBitsLength = bits;
@@ -51,6 +64,10 @@ NS_ASSUME_NONNULL_BEGIN
         _version = 0x04;
         _cipherAlgorithm = cipherAlgorithm;
         _hashAlgorithm = hashAlgorithm;
+        if (s2kIterationsCount == 0) {
+            PGPLogWarning(@"s2kIterationsCount must be 1–255; 0 produces keys that cannot be exported. Defaulting to 1.");
+        }
+        _s2kIterationsCount = s2kIterationsCount ?: 1;
         switch(algorithm) {
             case PGPPublicKeyAlgorithmEdDSA:
                 _curveKind = PGPCurveEd25519;
@@ -148,6 +165,7 @@ NS_ASSUME_NONNULL_BEGIN
         secretKeyPacket.s2kUsage = PGPS2KUsageEncryptedAndHashed;
 
         let s2k = [[PGPS2K alloc] initWithSpecifier:PGPS2KSpecifierIteratedAndSalted hashAlgorithm:self.hashAlgorithm];
+        s2k.iterationsCount = self.s2kIterationsCount;
         secretKeyPacket.s2k = s2k;
 
         // build encryptedMPIPartData
@@ -185,6 +203,10 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 + (nullable PGPKey *)buildKey:(nullable PGPKey *)key withPassphrase:(nullable NSString *)passphrase {
+    return [self buildKey:key withPassphrase:passphrase s2kIterationsCount:kPGPS2KUpgradedIterationsCount];
+}
+
++ (nullable PGPKey *)buildKey:(nullable PGPKey *)key withPassphrase:(nullable NSString *)passphrase s2kIterationsCount:(UInt8)s2kIterationsCount {
     let publicKeyPacket = PGPCast(key.publicKey.primaryKeyPacket, PGPPublicKeyPacket);
     let secretKeyPacket = PGPCast(key.secretKey.primaryKeyPacket, PGPSecretKeyPacket);
     
@@ -201,7 +223,13 @@ NS_ASSUME_NONNULL_BEGIN
     } else {
         secretKeyPacket.s2kUsage = PGPS2KUsageEncryptedAndHashed;
         secretKeyPacket.wasDecrypted = NO;
-        
+
+        // Create fresh S2K with new salt and the requested iteration count.
+        let s2k = [[PGPS2K alloc] initWithSpecifier:PGPS2KSpecifierIteratedAndSalted hashAlgorithm:hashAlgorithm];
+        s2k.iterationsCount = s2kIterationsCount;
+        secretKeyPacket.s2k = s2k;
+        secretKeyPacket.ivData = [PGPCryptoUtils randomData:blockSize];
+
         // build encryptedMPIPartData
         let plaintextMPIPartData = [NSMutableData data];
         for (PGPMPI *mpi in secretKeyPacket.secretMPIs) {
@@ -223,7 +251,7 @@ NS_ASSUME_NONNULL_BEGIN
                 break;
         }
 
-        let sessionKeyData = [secretKeyPacket.s2k produceSessionKeyWithPassphrase:PGPNN(passphrase)
+        let sessionKeyData = [s2k produceSessionKeyWithPassphrase:PGPNN(passphrase)
                                                                symmetricAlgorithm:symmetricAlgorithm];
         if (sessionKeyData) {
             secretKeyPacket.encryptedMPIPartData = [PGPCryptoCFB encryptData:plaintextMPIPartData
@@ -248,9 +276,9 @@ NS_ASSUME_NONNULL_BEGIN
             let spec = [[PGPKeySpec alloc] initWithKeyAlgorithm:PGPPublicKeyAlgorithmECDH
                                                             withCurve:PGPCurve25519
                                                     withKdfParameters:[PGPCurveKDFParameters defaultParameters]];
-            return [self addSubKeyTo:newKey passphrase:passphrase spec:spec];
+            return [self addSubKeyTo:newKey passphrase:passphrase spec:spec s2kIterationsCount:s2kIterationsCount];
         } else {
-            return [self addSubKeyTo:newKey passphrase:passphrase];
+            return [self addSubKeyTo:newKey passphrase:passphrase s2kIterationsCount:s2kIterationsCount];
         }
     })();
     let keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:publicKeyAlgorithm
@@ -298,6 +326,7 @@ NS_ASSUME_NONNULL_BEGIN
         secretSubKeyPacket.s2kUsage = PGPS2KUsageEncryptedAndHashed;
 
         let s2k = [[PGPS2K alloc] initWithSpecifier:PGPS2KSpecifierIteratedAndSalted hashAlgorithm:self.hashAlgorithm];
+        s2k.iterationsCount = self.s2kIterationsCount;
         secretSubKeyPacket.s2k = s2k;
 
         // build encryptedMPIPartData
@@ -339,11 +368,15 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 + (PGPKey *)addSubKeyTo:(PGPKey *)parentKey passphrase:(nullable NSString *)passphrase spec:(PGPKeySpec*)keySpec {
+    return [self addSubKeyTo:parentKey passphrase:passphrase spec:keySpec s2kIterationsCount:kPGPS2KUpgradedIterationsCount];
+}
+
++ (PGPKey *)addSubKeyTo:(PGPKey *)parentKey passphrase:(nullable NSString *)passphrase spec:(PGPKeySpec*)keySpec s2kIterationsCount:(UInt8)s2kIterationsCount {
     let secretSubKeyPacket = PGPCast(parentKey.secretKey.subKeys.firstObject.primaryKeyPacket, PGPSecretSubKeyPacket);
-    
+
     let symmetricAlgorithm = secretSubKeyPacket.symmetricAlgorithm;
     let hashAlgorithm = secretSubKeyPacket.s2k.hashAlgorithm;
-    
+
     // TODO: refactor duplicated code
     NSUInteger blockSize = [PGPCryptoUtils blockSizeOfSymmetricAlhorithm:symmetricAlgorithm];
     if (!passphrase) {
@@ -353,7 +386,13 @@ NS_ASSUME_NONNULL_BEGIN
     } else {
         secretSubKeyPacket.s2kUsage = PGPS2KUsageEncryptedAndHashed;
         secretSubKeyPacket.wasDecrypted = NO;
-        
+
+        // Create fresh S2K with new salt and the requested iteration count.
+        let s2k = [[PGPS2K alloc] initWithSpecifier:PGPS2KSpecifierIteratedAndSalted hashAlgorithm:hashAlgorithm];
+        s2k.iterationsCount = s2kIterationsCount;
+        secretSubKeyPacket.s2k = s2k;
+        secretSubKeyPacket.ivData = [PGPCryptoUtils randomData:blockSize];
+
         // build encryptedMPIPartData
         let plaintextMPIPartData = [NSMutableData data];
         for (PGPMPI *mpi in secretSubKeyPacket.secretMPIs) {
@@ -375,7 +414,7 @@ NS_ASSUME_NONNULL_BEGIN
                 break;
         }
 
-        let sessionKeyData = [secretSubKeyPacket.s2k produceSessionKeyWithPassphrase:PGPNN(passphrase)
+        let sessionKeyData = [s2k produceSessionKeyWithPassphrase:PGPNN(passphrase)
                                                                   symmetricAlgorithm:symmetricAlgorithm];
         if (sessionKeyData) {
             secretSubKeyPacket.encryptedMPIPartData = [PGPCryptoCFB encryptData:plaintextMPIPartData
@@ -390,9 +429,9 @@ NS_ASSUME_NONNULL_BEGIN
     let publicSubKey = parentKey.publicKey.subKeys.firstObject;
     let secretSubKey = [[PGPPartialSubKey alloc] initWithPacket:secretSubKeyPacket];
     parentKey.secretKey.subKeys = @[secretSubKey];
-    
+
     let subKey = [[PGPKey alloc] initWithSecretKey:secretSubKey publicKey:publicSubKey];
-    
+
     return subKey;
 }
 
@@ -407,6 +446,12 @@ NS_ASSUME_NONNULL_BEGIN
     let publicKeyPacket = PGPCast(parentKey.publicKey.primaryKeyPacket, PGPPublicKeyPacket);
     let spec = [[PGPKeySpec alloc] initWithKeyAlgorithm:publicKeyPacket.publicKeyAlgorithm withKeyBitsLength:3072];
     return [self addSubKeyTo:parentKey passphrase:passphrase spec:spec];
+}
+
++ (PGPKey *)addSubKeyTo:(PGPKey *)parentKey passphrase:(nullable NSString *)passphrase s2kIterationsCount:(UInt8)s2kIterationsCount {
+    let publicKeyPacket = PGPCast(parentKey.publicKey.primaryKeyPacket, PGPPublicKeyPacket);
+    let spec = [[PGPKeySpec alloc] initWithKeyAlgorithm:publicKeyPacket.publicKeyAlgorithm withKeyBitsLength:3072];
+    return [self addSubKeyTo:parentKey passphrase:passphrase spec:spec s2kIterationsCount:s2kIterationsCount];
 }
 
 - (NSArray<PGPSignatureSubpacket *> *)signatureCommonHashedSubpackets {

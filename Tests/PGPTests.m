@@ -13,6 +13,9 @@
 #import "PGPMacros+Private.h"
 #import <ObjectivePGP/PGPPartialKey+Private.h>
 #import <ObjectivePGP/PGPSignaturePacket.h>
+#import "PGPS2K.h"
+#import "PGPSecretKeyPacket.h"
+#import "PGPSecretKeyPacket+Private.h"
 #import "PGPTestUtils.h"
 #import <XCTest/XCTest.h>
 
@@ -1031,6 +1034,194 @@ Hy2rxOlSAfBZaJr9A7XSPlU=\n\
     XCTAssertNotNil(decrypted);
     XCTAssertEqual(verificationStatus, 0);
     XCTAssertEqualObjects(@"Hi Marcin, this a signed message", [[NSString alloc] initWithData:decrypted encoding:NSUTF8StringEncoding]);
+}
+
+#pragma mark - S2K iteration count tests
+
+- (void)testGenerateKeyWithCustomS2KIterationsCount {
+    // Verify that setting s2kIterationsCount on KeyGenerator propagates to the generated key's S2K.
+    PGPKeyGenerator *keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:PGPPublicKeyAlgorithmRSA
+                                                                 keyBitsLength:2048
+                                                               cipherAlgorithm:PGPSymmetricAES256
+                                                                 hashAlgorithm:PGPHashSHA256
+                                                           s2kIterationsCount:243];
+
+    NSString *passphrase = @"test-passphrase";
+    PGPKey *key = [keyGenerator generateFor:@"Test <test@example.com>" passphrase:passphrase];
+    XCTAssertNotNil(key);
+
+    // Check primary secret key S2K
+    PGPSecretKeyPacket *secretKeyPacket = (PGPSecretKeyPacket *)key.secretKey.primaryKeyPacket;
+    XCTAssertEqual(secretKeyPacket.s2k.specifier, PGPS2KSpecifierIteratedAndSalted);
+    XCTAssertEqual(secretKeyPacket.s2k.iterationsCount, 243);
+
+    // Check subkey S2K
+    PGPSecretKeyPacket *subKeyPacket = (PGPSecretKeyPacket *)key.secretKey.subKeys.firstObject.primaryKeyPacket;
+    XCTAssertEqual(subKeyPacket.s2k.specifier, PGPS2KSpecifierIteratedAndSalted);
+    XCTAssertEqual(subKeyPacket.s2k.iterationsCount, 243);
+}
+
+- (void)testGenerateKeyWithDefaultS2KIterationsCount {
+    // Verify that the default s2kIterationsCount is 215 (preserving backward compatibility).
+    PGPKeyGenerator *keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:PGPPublicKeyAlgorithmRSA
+                                                                 keyBitsLength:2048
+                                                               cipherAlgorithm:PGPSymmetricAES256
+                                                                 hashAlgorithm:PGPHashSHA256];
+    XCTAssertEqual(keyGenerator.s2kIterationsCount, 215);
+
+    NSString *passphrase = @"test-passphrase";
+    PGPKey *key = [keyGenerator generateFor:@"Test <test@example.com>" passphrase:passphrase];
+
+    PGPSecretKeyPacket *secretKeyPacket = (PGPSecretKeyPacket *)key.secretKey.primaryKeyPacket;
+    XCTAssertEqual(secretKeyPacket.s2k.iterationsCount, 215);
+}
+
+- (void)testS2KIterationsCountSurvivesExportAndReimport {
+    // Verify that the S2K count byte persists through export → reimport (wire format round-trip).
+    PGPKeyGenerator *keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:PGPPublicKeyAlgorithmRSA
+                                                                 keyBitsLength:2048
+                                                               cipherAlgorithm:PGPSymmetricAES256
+                                                                 hashAlgorithm:PGPHashSHA256
+                                                           s2kIterationsCount:243];
+
+    NSString *passphrase = @"test-passphrase";
+    PGPKey *key = [keyGenerator generateFor:@"Test <test@example.com>" passphrase:passphrase];
+
+    // Export and reimport
+    NSData *exportedData = [key export:PGPKeyTypeSecret error:nil];
+    XCTAssertNotNil(exportedData);
+
+    NSArray<PGPKey *> *reimportedKeys = [ObjectivePGP readKeysFromData:exportedData error:nil];
+    XCTAssertEqual(reimportedKeys.count, 1);
+
+    PGPSecretKeyPacket *reimportedPacket = (PGPSecretKeyPacket *)reimportedKeys.firstObject.secretKey.primaryKeyPacket;
+    XCTAssertEqual(reimportedPacket.s2k.iterationsCount, 243);
+
+    // Verify reimported key can be decrypted
+    NSError *error = nil;
+    PGPKey *decryptedKey = [reimportedKeys.firstObject decryptedWithPassphrase:passphrase error:&error];
+    XCTAssertNotNil(decryptedKey);
+    XCTAssertNil(error);
+}
+
+- (void)testBuildKeyWithPassphraseAndCustomS2KIterationsCount {
+    // Verify that buildKey:withPassphrase:s2kIterationsCount: applies the requested count.
+    PGPKeyGenerator *keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:PGPPublicKeyAlgorithmRSA
+                                                                 keyBitsLength:2048
+                                                               cipherAlgorithm:PGPSymmetricAES256
+                                                                 hashAlgorithm:PGPHashSHA256];
+    // Generate with default S2K (215)
+    NSString *passphrase = @"old-passphrase";
+    PGPKey *key = [keyGenerator generateFor:@"Test <test@example.com>" passphrase:passphrase];
+
+    // Decrypt and re-protect with new passphrase and custom S2K count
+    NSError *error = nil;
+    PGPKey *unlockedKey = [key decryptedWithPassphrase:passphrase error:&error];
+    XCTAssertNotNil(unlockedKey);
+
+    NSString *newPassphrase = @"new-passphrase";
+    PGPKey *reprotectedKey = [PGPKeyGenerator buildKey:unlockedKey withPassphrase:newPassphrase s2kIterationsCount:243];
+    XCTAssertNotNil(reprotectedKey);
+
+    // Verify S2K count was upgraded on primary key
+    PGPSecretKeyPacket *secretKeyPacket = (PGPSecretKeyPacket *)reprotectedKey.secretKey.primaryKeyPacket;
+    XCTAssertEqual(secretKeyPacket.s2k.iterationsCount, 243);
+
+    // Verify S2K count was upgraded on subkey
+    PGPSecretKeyPacket *subKeyPacket = (PGPSecretKeyPacket *)reprotectedKey.secretKey.subKeys.firstObject.primaryKeyPacket;
+    XCTAssertEqual(subKeyPacket.s2k.iterationsCount, 243);
+
+    // Verify the new passphrase works
+    error = nil;
+    PGPKey *decryptedKey = [reprotectedKey decryptedWithPassphrase:newPassphrase error:&error];
+    XCTAssertNotNil(decryptedKey);
+    XCTAssertNil(error);
+}
+
+- (void)testBuildKeyWithPassphraseDefaultsTo243 {
+    // Verify that the existing buildKey:withPassphrase: (without explicit count) now defaults to 243.
+    PGPKeyGenerator *keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:PGPPublicKeyAlgorithmRSA
+                                                                 keyBitsLength:2048
+                                                               cipherAlgorithm:PGPSymmetricAES256
+                                                                 hashAlgorithm:PGPHashSHA256];
+
+    NSString *passphrase = @"passphrase";
+    PGPKey *key = [keyGenerator generateFor:@"Test <test@example.com>" passphrase:passphrase];
+
+    NSError *error = nil;
+    PGPKey *unlockedKey = [key decryptedWithPassphrase:passphrase error:&error];
+    XCTAssertNotNil(unlockedKey);
+    XCTAssertNil(error);
+
+    PGPKey *reprotectedKey = [PGPKeyGenerator buildKey:unlockedKey withPassphrase:@"new-passphrase"];
+    XCTAssertNotNil(reprotectedKey);
+
+    PGPSecretKeyPacket *secretKeyPacket = (PGPSecretKeyPacket *)reprotectedKey.secretKey.primaryKeyPacket;
+    XCTAssertEqual(secretKeyPacket.s2k.iterationsCount, 243);
+}
+
+- (void)testLegacyKeyDecryptsAfterS2KUpgrade {
+    // Verify backward compatibility: a key generated with old S2K (215) can still be decrypted
+    // after the default was changed, because S2K parameters are read from the key packet itself.
+    PGPKeyGenerator *keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:PGPPublicKeyAlgorithmRSA
+                                                                 keyBitsLength:2048
+                                                               cipherAlgorithm:PGPSymmetricAES256
+                                                                 hashAlgorithm:PGPHashSHA256
+                                                           s2kIterationsCount:215];
+
+    NSString *passphrase = @"legacy-passphrase";
+    PGPKey *legacyKey = [keyGenerator generateFor:@"Legacy <legacy@example.com>" passphrase:passphrase];
+
+    // Export and reimport to simulate reading a stored key
+    NSData *exportedData = [legacyKey export:PGPKeyTypeSecret error:nil];
+    NSArray<PGPKey *> *reimportedKeys = [ObjectivePGP readKeysFromData:exportedData error:nil];
+
+    // Decrypt — must work even though the library default is now different
+    NSError *error = nil;
+    PGPKey *decryptedKey = [reimportedKeys.firstObject decryptedWithPassphrase:passphrase error:&error];
+    XCTAssertNotNil(decryptedKey);
+    XCTAssertNil(error);
+
+    // Verify the reimported key retained its original S2K count
+    PGPSecretKeyPacket *packet = (PGPSecretKeyPacket *)reimportedKeys.firstObject.secretKey.primaryKeyPacket;
+    XCTAssertEqual(packet.s2k.iterationsCount, 215);
+}
+
+- (void)testEncryptDecryptRoundTripWithUpgradedS2K {
+    // End-to-end: generate key with S2K 243, encrypt a message, decrypt it.
+    PGPKeyGenerator *keyGenerator = [[PGPKeyGenerator alloc] initWithAlgorithm:PGPPublicKeyAlgorithmRSA
+                                                                 keyBitsLength:2048
+                                                               cipherAlgorithm:PGPSymmetricAES256
+                                                                 hashAlgorithm:PGPHashSHA256
+                                                           s2kIterationsCount:243];
+
+    NSString *passphrase = @"secure-passphrase";
+    PGPKey *key = [keyGenerator generateFor:@"Secure <secure@example.com>" passphrase:passphrase];
+
+    NSString *plaintext = @"Hello from upgraded S2K";
+    NSData *plaintextData = [plaintext dataUsingEncoding:NSUTF8StringEncoding];
+
+    NSError *error = nil;
+    NSData *encrypted = [ObjectivePGP encrypt:plaintextData
+                                addSignature:NO
+                                   usingKeys:@[key]
+                            passphraseForKey:nil
+                                       error:&error];
+    XCTAssertNotNil(encrypted);
+    XCTAssertNil(error);
+
+    let passphraseBlock = ^NSString * _Nullable(PGPKey * _Nonnull k) {
+        return passphrase;
+    };
+    error = nil;
+    NSData *decrypted = [ObjectivePGP decrypt:encrypted
+                           andVerifySignature:NO
+                                    usingKeys:@[key]
+                             passphraseForKey:passphraseBlock
+                                        error:&error];
+    XCTAssertNotNil(decrypted);
+    XCTAssertNil(error);
+    XCTAssertEqualObjects(plaintext, [[NSString alloc] initWithData:decrypted encoding:NSUTF8StringEncoding]);
 }
 
 @end
